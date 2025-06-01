@@ -1,0 +1,73 @@
+# apps/registry-api/Dockerfile
+FROM node:18-alpine AS base
+RUN apk add --no-cache libc6-compat
+WORKDIR /app
+
+# Install dependencies
+FROM base AS deps
+COPY package.json package-lock.json* ./
+COPY packages/ipfs-storage/package.json ./packages/ipfs-storage/
+RUN npm ci --only=production
+
+# Build the application
+FROM base AS builder
+COPY . .
+COPY --from=deps /app/node_modules ./node_modules
+RUN npm run build --filter=registry-api
+
+# Production image
+FROM base AS runner
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 nextjs
+
+COPY --from=builder /app/apps/registry-api/public ./public
+COPY --from=builder --chown=nextjs:nodejs /app/apps/registry-api/.next/standalone ./
+COPY --from=builder --chown=nextjs:nodejs /app/apps/registry-api/.next/static ./.next/static
+
+USER nextjs
+EXPOSE 3000
+ENV PORT=3000
+
+CMD ["node", "server.js"]
+
+# apps/agent-runtime/Dockerfile  
+FROM node:18-alpine AS base
+RUN apk add --no-cache libc6-compat python3 make g++
+WORKDIR /app
+
+# Install dependencies
+FROM base AS deps
+COPY package.json package-lock.json* ./
+COPY packages/*/package.json ./packages/
+RUN npm ci --only=production
+
+# Build the application
+FROM base AS builder
+COPY . .
+COPY --from=deps /app/node_modules ./node_modules
+RUN npm run build --filter=agent-runtime
+
+# Production image
+FROM base AS runner
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs
+RUN adduser --system --uid 1001 agentrunner
+
+# Copy built application
+COPY --from=builder --chown=agentrunner:nodejs /app/apps/agent-runtime/dist ./dist
+COPY --from=builder --chown=agentrunner:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=agentrunner:nodejs /app/packages ./packages
+
+# Create directories for ZK setup
+RUN mkdir -p /app/zk-setup /app/proving-keys /app/verification-keys
+RUN chown -R agentrunner:nodejs /app/zk-setup /app/proving-keys /app/verification-keys
+
+USER agentrunner
+EXPOSE 3001
+ENV PORT=3001
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:3001/health || exit 1
+
+CMD ["node", "dist/server.js"]
